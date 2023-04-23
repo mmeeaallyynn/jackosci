@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc::Sender;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -7,6 +7,9 @@ use std::time::Duration;
 use itertools::Itertools;
 
 use eframe::egui;
+
+
+const INTIAL_BUFFER_SIZE: usize = 1000;
 
 
 fn main() {
@@ -60,7 +63,7 @@ struct OsciApp {
 
 impl OsciApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let (tx, rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         let (client, _status) =
             jack::Client::new("small_osci", jack::ClientOptions::NO_START_SERVER).unwrap();
 
@@ -71,25 +74,30 @@ impl OsciApp {
             input_port,
             tx
         };
-        let buffer = Arc::new(Mutex::new(VecDeque::from([0.0; 1000])));
+        let buffer = Arc::new(Mutex::new(VecDeque::from([0.0; INTIAL_BUFFER_SIZE])));
         let config = Arc::new(Mutex::new(OsciConfig {
             trigger_mode: TriggerMode::RisingEdge,
             trigger_level: 0.0,
-            buffer_size: 1000
+            buffer_size: INTIAL_BUFFER_SIZE
         }));
 
         let moved_buffer = buffer.clone();
         let moved_config = config.clone();
         let _updater = thread::spawn(move || {
-            let mut sliding_buffer = VecDeque::from([0.0; 1000]);
+            let mut sliding_buffer = VecDeque::from([0.0; INTIAL_BUFFER_SIZE]);
             let buffer = moved_buffer;
             let mut previous_last = 0.0;
             let config = moved_config;
             loop {
                 let OsciConfig {
                     trigger_mode,
-                    trigger_level, ..
+                    trigger_level,
+                    buffer_size
                 } = *config.lock().unwrap();
+
+                if buffer_size != sliding_buffer.len() {
+                    sliding_buffer.resize(buffer_size, 0.0);
+                }
 
                 let mut input = rx.recv().expect("there is nothing!");
                 input.insert(0, previous_last);
@@ -141,11 +149,12 @@ impl OsciApp {
         let stroke = egui::Stroke::new(1.0, egui::Color32::YELLOW);
         let painter = ui.painter();
         let buffer = self.buffer.lock().unwrap().clone();
-        let coords = std::iter::zip(0..1000, buffer);
+        let OsciConfig { buffer_size, .. } = *self.config.lock().unwrap();
+        let coords = std::iter::zip(0..buffer_size, buffer);
 
         for ((x1, y1), (x2, y2)) in coords.tuple_windows() {
-            let x1 = x1 as f32 / 1000.0 * window_size.x;
-            let x2 = x2 as f32 / 1000.0 * window_size.x;
+            let x1 = x1 as f32 / buffer_size as f32 * window_size.x;
+            let x2 = x2 as f32 / buffer_size as f32 * window_size.x;
             painter.line_segment(
                 [egui::Pos2 { x: x1, y: (1.0 - y1) * window_size.y - window_size.y / 2.0 },
                  egui::Pos2 { x: x2, y: (1.0 - y2) * window_size.y - window_size.y / 2.0 }],
@@ -177,6 +186,16 @@ impl eframe::App for OsciApp {
 
                 ui.add(egui::Slider::new(&mut trigger_level, -1.0..=1.0).text("trigger level"));
                 config.trigger_level = trigger_level;
+
+                let mut s = String::from(format!("{}", config.buffer_size));
+                ui.add_sized(ui.available_size(), egui::TextEdit::singleline(&mut s));
+                if &s == "" {
+                    config.buffer_size = 1;
+                }
+                else if let Ok(n) = usize::from_str_radix(&s, 10) {
+                    config.buffer_size = n;
+                }
+
             });
         });
 
