@@ -138,8 +138,8 @@ impl OsciApp {
         let OsciConfig { trigger_level, .. } = *self.config.lock().unwrap();
 
         painter.line_segment(
-            [egui::Pos2 { x: 0.0, y: (1.0 - trigger_level) * window_size.y - window_size.y / 2.0 },
-             egui::Pos2 { x: window_size.x, y: (1.0 - trigger_level) * window_size.y - window_size.y / 2.0 }],
+            [egui::Pos2 { x: 0.0, y: -trigger_level * window_size.y / 2.0 + window_size.y / 2.0 },
+             egui::Pos2 { x: window_size.x, y: -trigger_level * window_size.y / 2.0 + window_size.y / 2.0 }],
             stroke
         );
     }
@@ -156,8 +156,8 @@ impl OsciApp {
             let x1 = x1 as f32 / buffer_size as f32 * window_size.x;
             let x2 = x2 as f32 / buffer_size as f32 * window_size.x;
             painter.line_segment(
-                [egui::Pos2 { x: x1, y: (1.0 - y1) * window_size.y - window_size.y / 2.0 },
-                 egui::Pos2 { x: x2, y: (1.0 - y2) * window_size.y - window_size.y / 2.0 }],
+                [egui::Pos2 { x: x1, y: -y1 * window_size.y / 2.0 + window_size.y / 2.0 },
+                 egui::Pos2 { x: x2, y: -y2 * window_size.y / 2.0 + window_size.y / 2.0 }],
                 stroke
             );
         }
