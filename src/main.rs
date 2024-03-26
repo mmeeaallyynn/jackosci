@@ -13,12 +13,13 @@
  * limitations under the License.
  */
 
+use std::time::{Duration, SystemTime};
 use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use egui::Vec2;
 use itertools::Itertools;
 
 use eframe::egui;
@@ -55,18 +56,29 @@ enum TriggerMode {
     FallingEdge
 }
 
-impl TriggerMode {
-    fn test(&self, level: f32, prev: f32, value: f32) -> bool {
-        match self {
-            Self::RisingEdge => value > prev && level >= prev && level < value,
-            Self::FallingEdge => prev > value && level >= value && level < prev
-        }
+#[derive(Clone, Copy)]
+struct Trigger {
+	trigger_mode: TriggerMode,
+	trigger_level: f32,
+    hold_time: Duration
+}
+
+impl Trigger {
+    fn test(self, last_trigger_time: SystemTime, prev: f32, value: f32) -> bool {
+        let trigger_matches = match self.trigger_mode {
+            TriggerMode::RisingEdge =>
+            	value > prev && self.trigger_level >= prev && self.trigger_level < value,
+            TriggerMode::FallingEdge =>
+            	prev > value && self.trigger_level >= value && self.trigger_level < prev
+        };
+
+        trigger_matches && last_trigger_time.elapsed().unwrap() > self.hold_time
     }
 }
 
+#[derive(Clone, Copy)]
 struct OsciConfig {
-    trigger_mode: TriggerMode,
-    trigger_level: f32,
+    trigger: Trigger,
     buffer_size: usize
 }
 
@@ -91,8 +103,11 @@ impl OsciApp {
         };
         let buffer = Arc::new(Mutex::new(VecDeque::from([0.0; INTIAL_BUFFER_SIZE])));
         let config = Arc::new(Mutex::new(OsciConfig {
-            trigger_mode: TriggerMode::RisingEdge,
-            trigger_level: 0.0,
+            trigger: Trigger {
+                trigger_mode: TriggerMode::RisingEdge,
+                trigger_level: 0.0,
+                hold_time: Duration::from_millis(10)
+            },
             buffer_size: INTIAL_BUFFER_SIZE
         }));
 
@@ -103,21 +118,21 @@ impl OsciApp {
             let buffer = moved_buffer;
             let mut previous_last = 0.0;
             let config = moved_config;
-            loop {
-                let OsciConfig {
-                    trigger_mode,
-                    trigger_level,
-                    buffer_size
-                } = *config.lock().unwrap();
 
-                if buffer_size != sliding_buffer.len() {
-                    sliding_buffer.resize(buffer_size, 0.0);
+            let mut last_trigger_time = SystemTime::now();
+
+            loop {
+                let config = *config.lock().unwrap();
+
+                if config.buffer_size != sliding_buffer.len() {
+                    sliding_buffer.resize(config.buffer_size, 0.0);
                 }
 
                 let mut input = rx.recv().expect("there is nothing!");
                 input.insert(0, previous_last);
                 for (&prev, &item) in input.iter().tuple_windows() {
-                    if trigger_mode.test(trigger_level, prev, item) {
+                    if config.trigger.test(last_trigger_time, prev, item) {
+                        last_trigger_time = SystemTime::now();
                         let mut buffer = buffer.lock().unwrap();
                         let _ = std::mem::replace(&mut *buffer, sliding_buffer.clone());
                     }
@@ -150,7 +165,8 @@ impl OsciApp {
         let window_size = frame.info().window_info.size;
         let stroke = egui::Stroke::new(1.0, egui::Color32::LIGHT_YELLOW);
         let painter = ui.painter();
-        let OsciConfig { trigger_level, .. } = *self.config.lock().unwrap();
+        let OsciConfig { trigger, .. } = *self.config.lock().unwrap();
+        let trigger_level = trigger.trigger_level;
 
         painter.line_segment(
             [egui::Pos2 { x: 0.0, y: -trigger_level * window_size.y / 2.0 + window_size.y / 2.0 },
@@ -184,33 +200,38 @@ impl eframe::App for OsciApp {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 let mut config = self.config.lock().unwrap();
-                let mut trigger_level = config.trigger_level;
-                let current_trigger_name = match config.trigger_mode {
+                let mut trigger_level = config.trigger.trigger_level;
+                let current_trigger_name = match config.trigger.trigger_mode {
                     TriggerMode::RisingEdge => "Trigger: Rising Edge",
                     TriggerMode::FallingEdge => "Trigger: Falling Edge"
                 };
 
                 ui.menu_button(current_trigger_name, |ui| {
                     if ui.button("Rising Edge").clicked() {
-                        config.trigger_mode = TriggerMode::RisingEdge;
+                        config.trigger.trigger_mode = TriggerMode::RisingEdge;
                     }
                     else if ui.button("Falling Edge").clicked() {
-                        config.trigger_mode = TriggerMode::FallingEdge;
+                        config.trigger.trigger_mode = TriggerMode::FallingEdge;
                     }
                 });
 
                 ui.add(egui::Slider::new(&mut trigger_level, -1.0..=1.0).text("trigger level"));
-                config.trigger_level = trigger_level;
+                config.trigger.trigger_level = trigger_level;
 
-                let mut s = String::from(format!("{}", config.buffer_size));
-                ui.add_sized(ui.available_size(), egui::TextEdit::singleline(&mut s));
-                if &s == "" {
+                let mut buffer_size_string = String::from(format!("{}", config.buffer_size));
+                ui.add_sized(Vec2::new(100.0, 10.0), egui::TextEdit::singleline(&mut buffer_size_string));
+                if &buffer_size_string == "" {
                     config.buffer_size = 1;
                 }
-                else if let Ok(n) = usize::from_str_radix(&s, 10) {
+                else if let Ok(n) = usize::from_str_radix(&buffer_size_string, 10) {
                     config.buffer_size = n;
                 }
 
+                let mut hold_string = String::from(format!("{}", config.trigger.hold_time.as_micros()));
+                ui.add_sized(Vec2::new(100.0, 10.0), egui::TextEdit::singleline(&mut hold_string));
+                if let Ok(n) = usize::from_str_radix(&hold_string, 10) {
+                    config.trigger.hold_time = Duration::from_micros(n.try_into().unwrap());
+                }
             });
         });
 
@@ -218,6 +239,6 @@ impl eframe::App for OsciApp {
             ui.heading("Osci");
             self.draw_line(&ui, &frame); 
             self.draw_trigger(&ui, &frame);
-       });
+        });
     }
 }
